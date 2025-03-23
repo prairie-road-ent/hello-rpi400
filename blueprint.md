@@ -51,27 +51,27 @@ _start:
     // ----------------------------------------------------------------
     // Step 2: Retrieve Framebuffer Parameters
     // The mailbox_buffer is updated with the response. We extract:
-    //   - Display width (at offset 12 bytes)
-    //   - Display height (at offset 16 bytes)
-    //   - Pitch (bytes per line, at offset 20 bytes)
-    //   - Framebuffer base address (at offset 28 bytes)
+    //   - Virtual width (at offset 40 bytes)
+    //   - Virtual height (at offset 44 bytes)
+    //   - Pitch (bytes per line, at offset 96 bytes)
+    //   - Framebuffer base address (at offset 80 bytes)
     // ----------------------------------------------------------------
-    ldr w4, [mailbox_buffer, #12]      // w4 := physical display width (e.g. 800).
-    ldr w5, [mailbox_buffer, #16]      // w5 := physical display height (e.g. 600).
-    ldr w6, [mailbox_buffer, #20]      // w6 := pitch (bytes per row).
-    ldr x3, [mailbox_buffer, #28]      // x3 := framebuffer base address.
+    ldr x4, [x0, #40]                 // x4 := virtual display width (e.g. 800).
+    ldr x5, [x0, #44]                 // x5 := virtual display height (e.g. 600).
+    ldr x6, [x0, #96]                 // x6 := pitch (bytes per row).
+    ldr x3, [x0, #80]                 // x3 := framebuffer base address.
 
     // ----------------------------------------------------------------
     // Step 3: Fill the Framebuffer with Red
     // For a 32-bpp framebuffer, each pixel is 4 bytes. We loop over all pixels,
     // storing the red color (0x00FF0000) in each.
     // ----------------------------------------------------------------
-    mul w7, w4, w5                   // Compute total pixel count: width * height.
-    mov w8, #0x00FF0000              // Set w8 to red color in ARGB format (alpha 0, full red).
+    mul x7, x4, x5                    // Compute total pixel count: width * height (64-bit).
+    mov w8, #0x00FF0000               // Set w8 to red color in ARGB format (alpha 0, full red).
 fill_loop:
-    str w8, [x3], #4                // Store red in current pixel and increment the pointer.
-    subs w7, w7, #1                // Decrement pixel counter.
-    bne fill_loop                  // Continue until all pixels are processed.
+    str w8, [x3], #4                 // Store red in current pixel and increment the pointer.
+    subs x7, x7, #1                 // Decrement pixel counter (64-bit).
+    bne fill_loop                   // Continue until all pixels are processed.
 
     // ----------------------------------------------------------------
     // Step 4: Infinite Loop to Prevent Exit
@@ -92,8 +92,8 @@ mailbox_call:
 wait_mailbox:
     ldr x9, =MAILBOX_STATUS          // Load the mailbox status register address.
     ldr w10, [x9]                    // Read the mailbox status.
-    and w10, w10, #0x80000000         // Check if the mailbox is full (flag bit).
-    cbnz w10, wait_mailbox           // If full, loop until space is available.
+    tst w10, #0x80000000             // Check if the mailbox is full (flag bit).
+    b.ne wait_mailbox                // If full, loop until space is available.
 
     // Write the mailbox message with the channel identifier.
     ldr x11, =MAILBOX_WRITE         // Load the mailbox write register address.
@@ -104,12 +104,15 @@ wait_mailbox:
 wait_response:
     ldr x9, =MAILBOX_STATUS          // Reload the mailbox status register address.
     ldr w10, [x9]                    // Read the current status.
-    and w10, w10, #0x40000000         // Check if the mailbox is empty.
-    cbnz w10, wait_response          // Loop until data is available.
+    tst w10, #0x40000000             // Check if the mailbox is empty.
+    b.ne wait_response               // Loop until data is available.
     
-    // Read the response (optional verification can be done here).
+    // Read the response and verify channel
     ldr x11, =MAILBOX_READ          // Load the mailbox read register address.
     ldr x12, [x11]                  // Read the mailbox response.
+    and x12, x12, #0xF              // Mask channel ID
+    cmp x12, #8                     // Verify channel 8 response
+    b.ne wait_response              // Retry if wrong channel
     ret                             // Return to the caller.
 
 
@@ -129,75 +132,72 @@ mailbox_buffer:
     .word 35*4                     // Total message size in bytes (35 words = 140 bytes).
     .word 0                        // Request code: 0 indicates a request.
 
-    // Tag 1: Set physical display size.
+    // Tag 1: Set physical display size (offset 8)
     .word 0x48003                 // Tag ID for “set physical display size”.
     .word 8                       // Buffer size: 8 bytes (width and height).
     .word 0                       // Request code (0 for request).
-    .word 800                     // Physical width in pixels.
-    .word 600                     // Physical height in pixels.
+    .word 800                     // Physical width in pixels (offset 20).
+    .word 600                     // Physical height in pixels (offset 24).
 
-    // Tag 2: Set virtual display size.
+    // Tag 2: Set virtual display size (offset 28)
     .word 0x48004                 // Tag ID for “set virtual display size”.
     .word 8                       // Buffer size: 8 bytes.
     .word 0                       // Request code.
-    .word 800                     // Virtual width in pixels.
-    .word 600                     // Virtual height in pixels.
+    .word 800                     // Virtual width in pixels (offset 36).
+    .word 600                     // Virtual height in pixels (offset 40).
 
-    // Tag 3: Set pixel depth.
+    // Tag 3: Set pixel depth (offset 44)
     .word 0x48005                 // Tag ID for “set depth”.
     .word 4                       // Buffer size: 4 bytes.
     .word 0                       // Request code.
-    .word 32                      // 32 bits per pixel.
+    .word 32                      // 32 bits per pixel (offset 52).
 
-    // Tag 4: Allocate framebuffer.
+    // Tag 4: Allocate framebuffer (offset 56)
     .word 0x40001                 // Tag ID for “allocate framebuffer”.
     .word 8                       // Buffer size: 8 bytes.
     .word 0                       // Request code.
-    .word 16                      // Alignment requirement (16 bytes).
-    .word 0                       // (Response) This field will hold the framebuffer address.
+    .word 16                      // Alignment requirement (16 bytes) (offset 64).
+    .word 0                       // (Response) Framebuffer address (offset 68).
 
-    // Tag 5: Get pitch (bytes per line).
+    // Tag 5: Get pitch (offset 72)
     .word 0x40008                 // Tag ID for “get pitch”.
     .word 4                       // Buffer size: 4 bytes.
     .word 0                       // Request code.
-    .word 0                       // (Response) This field will be filled with the pitch.
+    .word 0                       // (Response) Pitch value (offset 80).
 
-    // End tag.
+    // End tag (offset 84)
     .word 0                       // Zero tag to indicate the end of the mailbox message.
 
-    // Pad the buffer to a total of 35 words.
-    .space ((35 - 23) * 4)         // We have defined 23 words; pad the rest.
+    // Pad the buffer to exactly 35 words (140 bytes)
+    .space (35 * 4) - (. - mailbox_buffer)
 
 
 // --------------------------------------------------------------------
 // Mailbox Registers Definitions (for Pi4)
-// These are based on the BCM2711 datasheet. Verify these addresses for your hardware.
+// These are based on the BCM2711 datasheet (Pi 4/400 uses 0xFE00B880 base).
 // --------------------------------------------------------------------
-    .section .bss
-    .align 4
-MAILBOX_BASE:  .word 0x4000B880  // Base address for the mailbox registers.
-    .section .text
-    .equ MAILBOX_READ,  (MAILBOX_BASE + 0x00)    // Mailbox read register.
-    .equ MAILBOX_STATUS,(MAILBOX_BASE + 0x18)     // Mailbox status register.
-    .equ MAILBOX_WRITE, (MAILBOX_BASE + 0x20)      // Mailbox write register.
+    .equ MAILBOX_BASE,  0xFE00B880  // Base address for Pi 4 mailbox registers.
+    .equ MAILBOX_READ,  MAILBOX_BASE + 0x00    // Mailbox read register.
+    .equ MAILBOX_STATUS, MAILBOX_BASE + 0x18    // Mailbox status register.
+    .equ MAILBOX_WRITE, MAILBOX_BASE + 0x20     // Mailbox write register.
 ```
 
 ### Explanation of Key Points in `kernel.S`:
 
 - **Entry Point (_start):**  
   The program starts at `_start`, where we immediately prepare a mailbox call to configure the display. This low-level initialization is essential in bare‑metal programming.
-  
+ 
 - **Mailbox Communication:**  
-  The mailbox interface is the standard method on the Pi to communicate with the GPU firmware (VideoCore). We use it to set up our display parameters and to obtain the framebuffer address.
-  
+  The mailbox interface is the standard method on the Pi to communicate with the GPU firmware (VideoCore). We use it to set up our display parameters and to obtain the framebuffer address. **Important:** Pi 4 uses different mailbox base addresses (0xFE00B880) compared to earlier models.
+
 - **Framebuffer Filling Loop:**  
-  After extracting the display width, height, pitch, and framebuffer address, we compute the number of pixels and fill the entire framebuffer with red. This loop ensures every pixel is written before the program enters an infinite loop.
+  After extracting the virtual width, height, pitch, and framebuffer address using **64-bit registers**, we compute the number of pixels and fill the entire framebuffer with red. Using 64-bit math prevents overflow with high-resolution displays.
 
 - **Data Section:**  
-  The `mailbox_buffer` is carefully structured to match the expected layout for a mailbox property message. Padding is added to meet the total word count expected by the firmware.
+  The `mailbox_buffer` is carefully structured with explicit offsets. Padding is calculated dynamically to ensure exactly 35 words. Response fields are now at correct offsets (e.g., framebuffer address at 68, pitch at 80).
 
-- **Mailbox Register Definitions:**  
-  The mailbox register addresses are defined per the BCM2711 documentation. Always verify these addresses with the latest documentation for your specific Pi model.
+- **Channel Verification:**  
+  The mailbox routine now checks that responses come from channel 8 to avoid processing unrelated messages.
 
 ---
 
@@ -212,7 +212,7 @@ ENTRY(_start)         /* Define the entry point of the program */
 SECTIONS
 {
   /* Set the load address to 0x8000, where the Pi firmware loads kernel images */
-  . = 0x8000;
+  . = 0x8000;        /* Raspberry Pi firmware expects kernel at this address */
 
   /* Code section: contains all executable instructions */
   .text : {
@@ -243,7 +243,7 @@ SECTIONS
   This directive tells the linker that `_start` is the entry point of the program.
 
 - **Memory Start Address:**  
-  The script sets the start address (`.`) to `0x8000` because the Raspberry Pi firmware expects the kernel image to be loaded at that address.
+  The script sets the start address (`.`) to `0x8000` because the Raspberry Pi firmware expects the kernel image to be loaded at that address. This is critical for successful booting.
 
 - **Section Grouping:**  
   All sections (code, read-only data, initialized data, and uninitialized data) are grouped so that the final binary image is contiguous and correctly organized for bare‑metal execution.
@@ -299,7 +299,7 @@ Follow these steps on your development machine (Linux/macOS/Windows with a suita
 
 2. **Populating the Boot Partition:**
 
-   - Copy the following files into the FAT32 boot partition:
+   - Copy the following Pi 4-specific files into the FAT32 boot partition:
      - **bootcode.bin**
      - **start4.elf**
      - **fixup4.dat**
@@ -307,9 +307,10 @@ Follow these steps on your development machine (Linux/macOS/Windows with a suita
      
      ```
      kernel=kernel8.img
+     arm_64bit=1
      ```
      
-     This tells the firmware to load your kernel image.
+     This tells the firmware to load your 64-bit kernel image.
      
    - Copy the compiled `kernel8.img` to the boot partition.
 
@@ -323,11 +324,21 @@ Follow these steps on your development machine (Linux/macOS/Windows with a suita
 
 ## Additional Considerations
 
-- **Display Querying:**  
-  If you want to query your 7″ Elecrow display’s native resolution rather than forcing 800×600, modify your mailbox message to use a “get physical display size” tag (for example, tag `0x40003`) instead of or in addition to the “set” tags. This will have the firmware return the actual resolution of the connected display.
+- **Dynamic Resolution Detection:**  
+  To query the display's native resolution instead of hardcoding 800×600, add a mailbox tag with ID `0x40003` (get physical display size). This requires adjusting the buffer structure to include response fields.
 
-- **Firmware and Register Validation:**  
-  Always verify the mailbox register addresses and tag IDs against the latest BCM2711 documentation for the Raspberry Pi 400. Updates in firmware or hardware revisions might require adjustments in your code.
+- **Error Handling:**  
+  Add checks for mailbox response codes (e.g., verify the high bit in tag responses is set to indicate success).
 
-- **Linker Script Adjustments:**  
-  The load address (`0x8000`) is typical for Raspberry Pi bare‑metal projects. If you have specific memory layout requirements, adjust the linker script accordingly.
+- **Performance Optimization:**  
+  For higher resolutions, optimize the fill loop using 64-bit writes:
+  ```assembly
+  mov x8, #0x00FF000000000000       // Red color for two pixels
+  fill_loop:
+    stp x8, x8, [x3], #16           // Write 16 bytes (4 pixels) per iteration
+    subs x7, x7, #4
+    b.gt fill_loop
+  ```
+
+- **Firmware Compatibility:**  
+  Always verify mailbox tag IDs and register addresses against the latest BCM2711 documentation. Raspberry Pi firmware updates may introduce changes.
